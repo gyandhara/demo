@@ -1,0 +1,164 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && request.auth.token.email != null && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        request.auth.token.email == 'likhoemailidmera@gmail.com'
+      );
+    }
+
+    function isStudentId(id) {
+      return id.matches('^std_[a-zA-Z0-9]+$');
+    }
+
+    function isOwner(userId) {
+      return (isSignedIn() && request.auth.uid == userId) || isStudentId(userId);
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidUser(data, expectedUid) {
+      return data.keys().hasAll(['uid', 'role', 'createdAt', 'updatedAt'])
+        && data.uid is string && data.uid == expectedUid 
+        && (data.get('email', '') is string) && data.get('email', '').size() <= 200
+        && data.role in ['student', 'admin']
+        && (data.get('displayName', '') is string) && data.get('displayName', '').size() <= 100
+        && (data.get('classLevel', '') is string) && data.get('classLevel', '').size() <= 50
+        && (data.get('totalScore', 0) is number)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidQuiz(data) {
+      return data.keys().hasAll(['title', 'classLevel', 'subject', 'topic', 'durationMinutes', 'totalQuestions', 'createdAt', 'createdBy'])
+        && data.title is string && data.title.size() > 0 && data.title.size() <= 200
+        && (data.get('description', '') is string) && data.get('description', '').size() <= 1000
+        && data.classLevel is string && data.classLevel.size() > 0 && data.classLevel.size() <= 50
+        && data.subject is string && data.subject.size() > 0 && data.subject.size() <= 100
+        && data.topic is string && data.topic.size() > 0 && data.topic.size() <= 200
+        && data.durationMinutes is number && data.durationMinutes > 0 && data.durationMinutes <= 300
+        && data.totalQuestions is number && data.totalQuestions >= 0 && data.totalQuestions <= 200
+        && data.createdAt is timestamp
+        && data.createdBy is string;
+    }
+
+    function isValidQuestion(data, quizId) {
+      return data.keys().hasAll(['quizId', 'text', 'options', 'correctOptionIndex'])
+        && data.quizId == quizId
+        && data.text is string && data.text.size() > 0 && data.text.size() <= 2000
+        && data.options is list && data.options.size() == 4
+        && data.options[0] is string && data.options[0].size() <= 500
+        && data.options[1] is string && data.options[1].size() <= 500
+        && data.options[2] is string && data.options[2].size() <= 500
+        && data.options[3] is string && data.options[3].size() <= 500
+        && data.correctOptionIndex is number && data.correctOptionIndex >= 0 && data.correctOptionIndex <= 3
+        && (data.get('explanation', '') is string) && data.get('explanation', '').size() <= 1000;
+    }
+
+    function isValidQuizAttempt(data) {
+      return data.keys().hasAll(['userId', 'quizId', 'score', 'totalQuestions', 'completedAt'])
+        && data.userId is string 
+        && data.quizId is string && data.quizId.size() > 0 && data.quizId.size() <= 128
+        && data.score is number && data.score >= 0
+        && data.totalQuestions is number && data.totalQuestions > 0
+        && data.completedAt is timestamp;
+    }
+
+    match /admins/{userId} {
+      allow read: if isAdmin();
+      allow write: if false; 
+    }
+
+    match /users/{userId} {
+      allow get: if isValidId(userId);
+      allow list: if true;
+      
+      allow create: if isValidId(userId) && (isOwner(userId))
+                    && isValidUser(incoming(), userId)
+                    && incoming().keys().size() <= 8
+                    && incoming().createdAt == request.time
+                    && incoming().updatedAt == request.time
+                    && (incoming().role == 'student' || (incoming().role == 'admin' && isSignedIn() && request.auth.token.email == 'likhoemailidmera@gmail.com'))
+                    && incoming().totalScore == 0;
+                    
+      allow update: if isValidId(userId) && (
+        (isOwner(userId) && isValidUser(incoming(), userId) && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'classLevel', 'totalScore', 'updatedAt'])
+          && incoming().updatedAt == request.time
+        ))
+        ||
+        (isAdmin() && isValidUser(incoming(), userId) && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['role', 'totalScore', 'updatedAt'])
+          && incoming().updatedAt == request.time
+        ))
+      );
+      
+      allow delete: if false;
+    }
+
+    match /quizzes/{quizId} {
+      allow get: if isValidId(quizId);
+      allow list: if true;
+      
+      allow create: if isValidId(quizId) && isAdmin() 
+                    && isValidQuiz(incoming())
+                    && incoming().keys().size() <= 9
+                    && incoming().createdAt == request.time;
+                    
+      allow update: if isValidId(quizId) && isAdmin() 
+                    && isValidQuiz(incoming())
+                    && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'classLevel', 'subject', 'topic', 'durationMinutes', 'totalQuestions']);
+      
+      allow delete: if isValidId(quizId) && isAdmin();
+
+      match /questions/{questionId} {
+        allow get: if isValidId(questionId);
+        allow list: if true;
+        
+        allow create: if isValidId(questionId) && isAdmin()
+                      && isValidQuestion(incoming(), quizId)
+                      && incoming().keys().size() <= 6;
+                      
+        allow update: if isValidId(questionId) && isAdmin()
+                      && isValidQuestion(incoming(), quizId)
+                      && incoming().diff(existing()).affectedKeys().hasOnly(['text', 'options', 'correctOptionIndex', 'explanation']);
+        
+        allow delete: if isValidId(questionId) && isAdmin();
+      }
+    }
+
+    match /quizAttempts/{attemptId} {
+      allow get: if isValidId(attemptId);
+      allow list: if true;
+      
+      allow create: if isValidId(attemptId) && (isOwner(incoming().userId))
+                    && isValidQuizAttempt(incoming())
+                    && incoming().keys().size() <= 5
+                    && incoming().completedAt == request.time;
+                    
+      allow update: if false;
+      allow delete: if false;
+    }
+  }
+}
